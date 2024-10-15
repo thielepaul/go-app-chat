@@ -1,18 +1,20 @@
 package rpc
 
 import (
+	"errors"
 	"log"
 	"net/http"
+	"net/rpc"
 
 	"github.com/coder/websocket"
 )
 
 type Backend struct {
-	clients []*Client
+	clients map[string]*Client
 }
 
 func NewBackend() *Backend {
-	backend := &Backend{}
+	backend := &Backend{clients: make(map[string]*Client)}
 
 	rpcServer, err := newServer(backend)
 	if err != nil {
@@ -21,6 +23,7 @@ func NewBackend() *Backend {
 
 	http.Handle(FrontendToBackendPath,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			log.Println("new client f2b connected", r.RemoteAddr)
 			wsConn, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				log.Printf("error accepting websocket f2b: %s", err)
@@ -29,6 +32,7 @@ func NewBackend() *Backend {
 			defer wsConn.CloseNow()
 			rpcServer.serveConn(wsConn)
 			wsConn.Close(websocket.StatusNormalClosure, "")
+			log.Println("client f2b disconnected", r.RemoteAddr)
 		}))
 
 	http.Handle(BackendToFrontendPath,
@@ -39,16 +43,22 @@ func NewBackend() *Backend {
 				return
 			}
 			client := newClient(wsConn)
-			backend.clients = append(backend.clients, client)
-			log.Println("new client connected")
+			backend.clients[r.RemoteAddr] = client
+			log.Println("new client b2f connected", r.RemoteAddr)
 		}))
 	return backend
 }
 
 func (c *Backend) AddMessage(message string, _ *struct{}) error {
-	for _, client := range c.clients {
-		_, _ = Call(client, (&Frontend{}).AddMessage, message)
-		// ignore errors because each we do not handle connection close correctly yet
+	for addr, client := range c.clients {
+		if _, err := Call(client, (&Frontend{}).AddMessage, message); err != nil {
+			if errors.Is(err, rpc.ErrShutdown) {
+				log.Println("client b2f is disconnected", addr)
+				delete(c.clients, addr)
+			} else {
+				log.Printf("error sending message to %s: %s", addr, err)
+			}
+		}
 	}
 	return nil
 }
